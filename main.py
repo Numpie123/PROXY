@@ -153,3 +153,21 @@ def arc_fetch(body: ARCFetchRequest, authorization: Optional[str] = Header(None)
             return {"status_code": r.status_code, "text": r.text[:2000]}
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
+
+@app.get("/debug/test_arc")
+def test_arc():
+    import requests
+    try:
+        r = requests.get("http://49.249.49.218:5000", timeout=5)
+        return {"status": r.status_code, "body": r.text[:300]}
+    except Exception as e:
+        return {"error": str(e)}
+@app.get("/debug/test_irrms")
+def test_irrms():
+    import requests
+    try:
+        r = requests.get("https://irrms-service.locomatrice.com", timeout=5)
+        return {"status": r.status_code, "body": r.text[:300]}
+    except Exception as e:
+        return {"error": str(e)}
+
