@@ -97,43 +97,54 @@ def debug_check(url: str, method: str = "GET", x_proxy_secret: Optional[str] = H
         raise HTTPException(status_code=502, detail=f"Proxy request failed: {str(e)}")
 
 @app.post("/api/irrms/fetch")
-def irrms_fetch(body: IRRMSFetchRequest, x_proxy_secret: Optional[str] = Header(None)):
-    verify(x_proxy_secret)
+def irrms_fetch(body: IRRMSFetchRequest, authorization: Optional[str] = Header(None)):
+    """
+    FIXED: Railway proxy now sends FULL IRRMS payload exactly like the working local script.
+    """
+    check_auth(authorization)
 
-    key = body.authenticateKey
-    if not key:
-        raise HTTPException(status_code=400, detail="Missing authenticateKey")
+    # get authenticateKey from body OR env
+    auth_key = body.authenticateKey or get_irrms_key_for_shed(body.shed_name)
+    if not auth_key:
+        raise HTTPException(status_code=400, detail="Missing authenticateKey for IRRMS")
 
+    # REQUIRED IRRMS headers
     headers = {
-        "Content-Type": "application/json",
-        "Authorization": key,
+        "Content-Type": "application/json; charset=UTF-8",
         "Origin": "https://irrms.locomatrice.com",
-        "Referer": "https://irrms.locomatrice.com/"
+        "Referer": "https://irrms.locomatrice.com/",
+        "Accept": "application/json, text/plain, */*",
+        "Authorization": auth_key
     }
 
+    # TIME WINDOW – EXACTLY SAME AS YOUR LOCAL SCRIPT
+    now = datetime.utcnow()
     payload = {
         "locoId": 0,
         "locoTypeId": 0,
         "shedId": body.shedId or 0,
         "vendorId": 0,
+        "startDate": now.strftime("%Y-%m-%d"),
+        "endDate": (now + timedelta(days=1)).strftime("%Y-%m-%d"),
         "actionMode": "temperatureventilation",
-        "fromDateTime": body.fromDateTime,
-        "toDateTime": body.toDateTime,
+        "fromDateTime": (now - timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S"),
+        "toDateTime": (now + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S"),
         "locoNo": "All",
         "refId": "GetSearchData"
     }
 
-    # remove None values
-    payload = {k: v for k, v in payload.items() if v is not None}
-
     try:
-        r = session.post(IRRMS_DATA_URL, headers=headers, json=payload, timeout=20)
+        r = session.post(IRRMS_DATA_URL, json=payload, headers=headers, timeout=25)
+
+        # return uniform proxy wrapper format
         try:
             return {"status_code": r.status_code, "json": r.json()}
         except:
             return {"status_code": r.status_code, "text": r.text[:2000]}
+
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
+
 
 @app.post("/api/arc/fetch")
 def arc_fetch(body: ARCFetchRequest, x_proxy_secret: Optional[str] = Header(None)):
