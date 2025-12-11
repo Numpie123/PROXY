@@ -121,8 +121,6 @@ def debug_check(url: str, method: str = "GET", x_proxy_secret: Optional[str] = H
 
 
 # ------------------------------
-# IRRMS FETCH — FIXED
-# ------------------------------
 @app.post("/api/irrms/fetch")
 def irrms_fetch(
     body: IRRMSFetchRequest,
@@ -130,26 +128,47 @@ def irrms_fetch(
 ):
     check_auth(x_proxy_secret)
 
-    shed = body.shed_name
+    shed = body.shed_name.upper()
     auth_key = body.authenticateKey or get_irrms_key_for_shed(shed)
 
     if not auth_key:
-        raise HTTPException(
-            status_code=400,
-            detail=f"No IRRMS authenticateKey for shed {shed}"
-        )
+        raise HTTPException(status_code=400, detail=f"No authenticateKey for shed {shed}")
 
-    headers = {
+    # -------- 1) LOGIN FIRST --------
+    login_payload = {
+        "authenticateKey": auth_key,
+        "sessionType": "login",
+        "uniqueCode": "",
+        "userId": "",
+        "shed_name": shed
+    }
+
+    login_headers = {
         "Content-Type": "application/json; charset=UTF-8",
         "Origin": "https://irrms.locomatrice.com",
         "Referer": "https://irrms.locomatrice.com/",
-        "Accept": "application/json, text/plain, */*",
-        "Authorization": auth_key
+        "Accept": "application/json, text/plain, */*"
     }
 
-    now = datetime.utcnow()
+    try:
+        login_resp = session.post(
+            IRRMS_LOGIN_URL,
+            data=json.dumps(login_payload),
+            headers=login_headers,
+            timeout=15
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"IRRMS login failed: {str(e)}")
 
-    payload = {
+    if login_resp.status_code != 200:
+        return {
+            "status_code": login_resp.status_code,
+            "json": {"error": "IRRMS login failed", "body": login_resp.text[:300]}
+        }
+
+    # -------- 2) AFTER LOGIN → FETCH DATA --------
+    now = datetime.utcnow()
+    data_payload = {
         "locoId": 0,
         "locoTypeId": 0,
         "shedId": body.shedId or 0,
@@ -163,16 +182,24 @@ def irrms_fetch(
         "refId": "GetSearchData"
     }
 
+    data_headers = {
+        "Content-Type": "application/json; charset=UTF-8",
+        "Authorization": auth_key,
+        "Origin": "https://irrms.locomatrice.com",
+        "Referer": "https://irrms.locomatrice.com/"
+    }
+
     try:
-        r = session.post(IRRMS_DATA_URL, headers=headers, json=payload, timeout=25)
-
-        try:
-            return {"status_code": r.status_code, "json": r.json()}
-        except:
-            return {"status_code": r.status_code, "text": r.text[:2000]}
-
+        r = session.post(IRRMS_DATA_URL, json=data_payload, headers=data_headers, timeout=25)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
+
+    # -------- UNIFORM PROXY OUTPUT --------
+    try:
+        return {"status_code": r.status_code, "json": r.json()}
+    except:
+        return {"status_code": r.status_code, "text": r.text[:2000]}
+
 
 
 # ------------------------------
