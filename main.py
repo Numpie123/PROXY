@@ -12,6 +12,7 @@ from pydantic import BaseModel
 import os, requests, logging, json, socket
 from typing import Optional, Dict, Any
 from requests.adapters import HTTPAdapter, Retry
+from datetime import datetime, timedelta
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("proxy")
@@ -26,8 +27,14 @@ PROXY_SECRET = os.environ.get("PROXY_SECRET", "changeme")  # MUST SET IN RAILWAY
 ARC_LOGIN_URL = os.environ.get("ARC_LOGIN_URL", "http://49.249.49.218:5000/api/login")
 ARC_LIVE_URL  = os.environ.get("ARC_LIVE_URL",  "http://49.249.49.218:5000/api/DefTableLocodetails")
 
-IRRMS_LOGIN_URL = os.environ.get("IRRMS_LOGIN_URL", "https://irrms-service.locomatrice.com/RMS/save/session/management/login")
-IRRMS_DATA_URL  = os.environ.get("IRRMS_DATA_URL",  "https://irrms-service.locomatrice.com/RMS/get/realTimeData/getAllLocosRealtimeData")
+IRRMS_LOGIN_URL = os.environ.get(
+    "IRRMS_LOGIN_URL",
+    "https://irrms-service.locomatrice.com/RMS/save/session/management/login"
+)
+IRRMS_DATA_URL  = os.environ.get(
+    "IRRMS_DATA_URL",
+    "https://irrms-service.locomatrice.com/RMS/get/realTimeData/getAllLocosRealtimeData"
+)
 
 # ------------------------------
 # RETRY SESSION
@@ -36,21 +43,40 @@ session = requests.Session()
 retries = Retry(
     total=2,
     backoff_factor=0.5,
-    status_forcelist=[502,503,504],
-    allowed_methods=["GET","POST"]
+    status_forcelist=[502, 503, 504],
+    allowed_methods=["GET", "POST"]
 )
 session.mount("http://", HTTPAdapter(max_retries=retries))
 session.mount("https://", HTTPAdapter(max_retries=retries))
 
 # ------------------------------
-# AUTH CHECK (NEW: X-PROXY-SECRET)
+# SECRET CHECK
 # ------------------------------
 def verify(secret_header: Optional[str]):
     if secret_header is None:
         raise HTTPException(status_code=401, detail="Missing X-Proxy-Secret header")
 
     if secret_header != PROXY_SECRET:
-        raise HTTPException(status_code=403, detail="Invalid X-Proxy-Secret")
+        raise HTTPException(status_code=403, detail="Invalid Proxy Secret")
+
+# ------------------------------
+# Helpers
+# ------------------------------
+def get_irrms_key_for_shed(shed: str) -> Optional[str]:
+    shed = shed.upper()
+
+    mapping = {
+        "TATA": os.environ.get("TATA_AUTH"),
+        "BKSC": os.environ.get("BKSC_AUTH"),
+        "ROU":  os.environ.get("ROU_AUTH"),
+        "BNDM": os.environ.get("BNDM_AUTH")
+    }
+
+    return mapping.get(shed)
+
+def check_auth(x_proxy_secret: Optional[str]):
+    """Ensures Streamlit sends correct secret."""
+    verify(x_proxy_secret)
 
 # ------------------------------
 # MODELS
@@ -59,9 +85,6 @@ class IRRMSFetchRequest(BaseModel):
     shed_name: str
     shedId: Optional[int] = 0
     authenticateKey: Optional[str] = None
-    fromDateTime: Optional[str] = None
-    toDateTime: Optional[str] = None
-    extra: Optional[Dict[str, Any]] = None
 
 class ARCFetchRequest(BaseModel):
     page: Optional[int] = 1
@@ -69,9 +92,8 @@ class ARCFetchRequest(BaseModel):
 # ------------------------------
 # ENDPOINTS
 # ------------------------------
-
 @app.get("/api/debug/ip")
-def get_server_ip(x_proxy_secret: Optional[str] = Header(None)):
+def get_ip(x_proxy_secret: Optional[str] = Header(None)):
     verify(x_proxy_secret)
 
     hostname = socket.gethostname()
@@ -81,6 +103,7 @@ def get_server_ip(x_proxy_secret: Optional[str] = Header(None)):
         public_ip = None
 
     return {"hostname": hostname, "public_ip": public_ip}
+
 
 @app.post("/api/debug/check")
 def debug_check(url: str, method: str = "GET", x_proxy_secret: Optional[str] = Header(None)):
@@ -96,19 +119,26 @@ def debug_check(url: str, method: str = "GET", x_proxy_secret: Optional[str] = H
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Proxy request failed: {str(e)}")
 
+
+# ------------------------------
+# IRRMS FETCH — FIXED
+# ------------------------------
 @app.post("/api/irrms/fetch")
-def irrms_fetch(body: IRRMSFetchRequest, authorization: Optional[str] = Header(None)):
-    """
-    FIXED: Railway proxy now sends FULL IRRMS payload exactly like the working local script.
-    """
-    check_auth(authorization)
+def irrms_fetch(
+    body: IRRMSFetchRequest,
+    x_proxy_secret: Optional[str] = Header(None)
+):
+    check_auth(x_proxy_secret)
 
-    # get authenticateKey from body OR env
-    auth_key = body.authenticateKey or get_irrms_key_for_shed(body.shed_name)
+    shed = body.shed_name
+    auth_key = body.authenticateKey or get_irrms_key_for_shed(shed)
+
     if not auth_key:
-        raise HTTPException(status_code=400, detail="Missing authenticateKey for IRRMS")
+        raise HTTPException(
+            status_code=400,
+            detail=f"No IRRMS authenticateKey for shed {shed}"
+        )
 
-    # REQUIRED IRRMS headers
     headers = {
         "Content-Type": "application/json; charset=UTF-8",
         "Origin": "https://irrms.locomatrice.com",
@@ -117,8 +147,8 @@ def irrms_fetch(body: IRRMSFetchRequest, authorization: Optional[str] = Header(N
         "Authorization": auth_key
     }
 
-    # TIME WINDOW – EXACTLY SAME AS YOUR LOCAL SCRIPT
     now = datetime.utcnow()
+
     payload = {
         "locoId": 0,
         "locoTypeId": 0,
@@ -134,9 +164,8 @@ def irrms_fetch(body: IRRMSFetchRequest, authorization: Optional[str] = Header(N
     }
 
     try:
-        r = session.post(IRRMS_DATA_URL, json=payload, headers=headers, timeout=25)
+        r = session.post(IRRMS_DATA_URL, headers=headers, json=payload, timeout=25)
 
-        # return uniform proxy wrapper format
         try:
             return {"status_code": r.status_code, "json": r.json()}
         except:
@@ -146,12 +175,17 @@ def irrms_fetch(body: IRRMSFetchRequest, authorization: Optional[str] = Header(N
         raise HTTPException(status_code=502, detail=str(e))
 
 
+# ------------------------------
+# ARC FETCH
+# ------------------------------
 @app.post("/api/arc/fetch")
-def arc_fetch(body: ARCFetchRequest, x_proxy_secret: Optional[str] = Header(None)):
+def arc_fetch(
+    body: ARCFetchRequest,
+    x_proxy_secret: Optional[str] = Header(None)
+):
     verify(x_proxy_secret)
 
-    page = body.page or 1
-    url = f"{ARC_LIVE_URL}?page={page}"
+    url = f"{ARC_LIVE_URL}?page={body.page or 1}"
 
     try:
         r = session.get(url, timeout=20)
@@ -162,7 +196,10 @@ def arc_fetch(body: ARCFetchRequest, x_proxy_secret: Optional[str] = Header(None
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
-# Simple manual test endpoints
+
+# ------------------------------
+# TEST ENDPOINTS
+# ------------------------------
 @app.get("/debug/test_arc")
 def test_arc():
     try:
@@ -178,5 +215,3 @@ def test_irrms():
         return {"status": r.status_code, "body": r.text[:300]}
     except Exception as e:
         return {"error": str(e)}
-
-
